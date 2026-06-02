@@ -142,8 +142,10 @@
 	// découpe sur "\n\n" (frontière d'event SSE).
 	function handleEvent( raw, ctx ) {
 		// On ne garde que les lignes data: et on recolle leur contenu.
+		// split(/\r?\n/) : tolère les fins de ligne CRLF (sse-starlette en émet)
+		// comme LF -> sinon un \r résiduel traîne en fin de chaque ligne.
 		var dataLines = raw
-			.split( '\n' )
+			.split( /\r?\n/ )
 			.filter( function ( l ) {
 				return l.indexOf( 'data:' ) === 0;
 			} )
@@ -250,8 +252,10 @@
 				}
 				buffer += decoder.decode( chunk.value, { stream: true } );
 
-				// Découpe sur la frontière d'event SSE (ligne vide).
-				var parts = buffer.split( '\n\n' );
+				// Découpe sur la frontière d'event SSE (ligne vide). On tolère les
+				// trois variantes possibles : CRLF (\r\n\r\n, ce qu'émet
+				// sse-starlette), LF (\n\n) et CR seul (\r\r).
+				var parts = buffer.split( /\r\n\r\n|\n\n|\r\r/ );
 				buffer = parts.pop(); // dernier morceau = potentiellement incomplet
 				parts.forEach( function ( part ) {
 					if ( part.trim() ) {

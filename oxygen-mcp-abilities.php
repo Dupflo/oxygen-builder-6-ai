@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Oxygen Builder 6 AI
  * Description: Expose des "abilities" Oxygen via l'Abilities API + MCP Adapter (WordPress 7.0). Lecture/écriture de l'arbre de page Oxygen 6. Inclut une page d'accueil de configuration (admin).
- * Version: 0.6.2
+ * Version: 0.6.3
  * Requires at least: 7.0
  * Requires PHP: 8.1
  * Author: Florian Dupuis
@@ -117,7 +117,7 @@ function oxygen_mcp_chat_assets( $hook ) {
 	}
 
 	$base = plugin_dir_url( __FILE__ ) . 'assets/';
-	$ver  = '0.6.2';
+	$ver  = '0.6.3';
 	wp_enqueue_style( 'oxymcp-chat', $base . 'chat.css', array(), $ver );
 	wp_enqueue_script( 'oxymcp-chat', $base . 'chat.js', array(), $ver, true );
 
@@ -1962,7 +1962,7 @@ function oxygen_mcp_create_server( $adapter ) {
 		'mcp',                            // route REST → /wp-json/oxygen-mcp/mcp
 		'Oxygen MCP',                     // nom lisible
 		'Pilotage Oxygen 6 via abilities', // description
-		'v0.6.2',                         // version
+		'v0.6.3',                         // version
 		array(                            // transports
 			\WP\MCP\Transport\HttpTransport::class,
 		),
