@@ -1,0 +1,8 @@
+# Dépendances Composer (MCP Adapter) — buildées à l'install, pas versionnées
+/vendor/
+composer.lock
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
