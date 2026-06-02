@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Oxygen Builder 6 AI
  * Description: Expose des "abilities" Oxygen via l'Abilities API + MCP Adapter (WordPress 7.0). Lecture/écriture de l'arbre de page Oxygen 6. Inclut une page d'accueil de configuration (admin).
- * Version: 0.7.0
+ * Version: 0.7.1
  * Requires at least: 7.0
  * Requires PHP: 8.1
  * Author: Florian Dupuis
@@ -117,7 +117,7 @@ function oxygen_mcp_chat_assets( $hook ) {
 	}
 
 	$base = plugin_dir_url( __FILE__ ) . 'assets/';
-	$ver  = '0.7.0';
+	$ver  = '0.7.1';
 	wp_enqueue_style( 'oxymcp-chat', $base . 'chat.css', array(), $ver );
 	wp_enqueue_script( 'oxymcp-chat', $base . 'chat.js', array(), $ver, true );
 
@@ -973,6 +973,52 @@ function oxygen_mcp_register_abilities() {
 			},
 		)
 	);
+
+	// --- oxygen-mcp/list-pages : INVENTAIRE des contenus (lecture seule). ---
+	// Les autres abilities opèrent sur UNE page via post_id ; sans cet outil
+	// l'agent n'a aucun moyen de découvrir quels contenus existent. Renvoie
+	// id/titre/statut/slug/lien (+ has_oxygen) pour que l'agent enchaîne ensuite
+	// sur get-page-tree avec le bon post_id.
+	wp_register_ability(
+		'oxygen-mcp/list-pages',
+		array(
+			'category'      => 'oxygen-mcp',
+			'label'         => __( 'Oxygen List Pages', 'oxygen-mcp' ),
+			'description'   => 'Liste les contenus du site (lecture seule) : id, titre, statut, slug, lien, has_oxygen. Par défaut les `page` ; `post_type` permet de cibler "post" (articles) ou "any". Permet à l’agent de découvrir les post_id à inspecter.',
+			'input_schema'  => array(
+				'type'       => 'object',
+				'properties' => array(
+					'post_type' => array(
+						// Pas d'`enum` strict : on accepte aussi des CPT custom.
+						// Défaut appliqué côté exec = "page".
+						'type'        => 'string',
+						'description' => 'Type de contenu : "page" (défaut), "post" (articles), "any" (tous), ou un custom post type.',
+					),
+					'post_status' => array(
+						'type'        => 'string',
+						'description' => 'Statut WP : "any" (défaut), "publish", "draft"…',
+					),
+					'limit'     => array(
+						'type'        => 'integer',
+						'description' => 'Nombre max d’items (défaut 100, plafonné à 200).',
+					),
+				),
+			),
+			'output_schema' => array(
+				'type'       => 'object',
+				'properties' => array(
+					'ok'    => array( 'type' => 'boolean' ),
+					'count' => array( 'type' => 'integer' ),
+					'items' => array( 'type' => 'array' ),
+					'error' => array( 'type' => 'string' ),
+				),
+			),
+			'execute_callback'    => 'oxygen_mcp_list_pages_exec',
+			'permission_callback' => function () {
+				return current_user_can( 'manage_options' );
+			},
+		)
+	);
 }
 
 /**
@@ -1003,6 +1049,61 @@ function oxygen_mcp_get_page_tree_exec( $input ) {
 		'post_id'  => $post_id,
 		'has_tree' => false !== $tree,
 		'tree'     => false === $tree ? null : $tree,
+	);
+}
+
+/**
+ * Callback list-pages. Inventaire LECTURE SEULE des contenus pour que l'agent
+ * découvre les post_id à inspecter. On reste volontairement léger (pas de
+ * contenu, juste des métadonnées) pour un payload compact.
+ *
+ * Piège PHP : `get_posts()` force `suppress_filters` et renvoie un tableau
+ * d'objets WP_Post → on projette uniquement les champs utiles. `has_oxygen`
+ * = présence du postmeta `_oxygen_data` (≈ get-page-tree), sans décoder l'arbre.
+ */
+function oxygen_mcp_list_pages_exec( $input ) {
+	$post_type   = isset( $input['post_type'] ) && '' !== $input['post_type']
+		? (string) $input['post_type']
+		: 'page';
+	$post_status = isset( $input['post_status'] ) && '' !== $input['post_status']
+		? (string) $input['post_status']
+		: 'any';
+	// Plafond dur : borne le payload même si l'agent demande plus.
+	$limit = isset( $input['limit'] ) ? (int) $input['limit'] : 100;
+	$limit = max( 1, min( 200, $limit ) );
+
+	$posts = get_posts(
+		array(
+			'post_type'        => $post_type,
+			'post_status'      => $post_status,
+			'numberposts'      => $limit,
+			'orderby'          => 'date',
+			'order'            => 'DESC',
+			// 'any' n'est pas un statut valide pour get_posts par défaut sur les
+			// brouillons : on le passe explicitement via post_status ci-dessus,
+			// WP_Query gère 'any' (exclut seulement trash/auto-draft).
+			'suppress_filters' => false,
+		)
+	);
+
+	$items = array();
+	foreach ( $posts as $p ) {
+		$items[] = array(
+			'post_id'    => (int) $p->ID,
+			'title'      => get_the_title( $p ),
+			'status'     => $p->post_status,
+			'type'       => $p->post_type,
+			'slug'       => $p->post_name,
+			'link'       => get_permalink( $p ),
+			// '' (chaîne vide) si jamais ouvert dans Oxygen -> false.
+			'has_oxygen' => '' !== get_post_meta( $p->ID, '_oxygen_data', true ),
+		);
+	}
+
+	return array(
+		'ok'    => true,
+		'count' => count( $items ),
+		'items' => $items,
 	);
 }
 
@@ -1984,7 +2085,7 @@ function oxygen_mcp_create_server( $adapter ) {
 		'mcp',                            // route REST → /wp-json/oxygen-mcp/mcp
 		'Oxygen MCP',                     // nom lisible
 		'Pilotage Oxygen 6 via abilities', // description
-		'v0.7.0',                         // version
+		'v0.7.1',                         // version
 		array(                            // transports
 			\WP\MCP\Transport\HttpTransport::class,
 		),
@@ -2005,6 +2106,7 @@ function oxygen_mcp_create_server( $adapter ) {
 			'oxygen-mcp/get-selectors',
 			'oxygen-mcp/get-variables',
 			'oxygen-mcp/verify-page',
+			'oxygen-mcp/list-pages',
 		),
 		array(),
 		array(),
