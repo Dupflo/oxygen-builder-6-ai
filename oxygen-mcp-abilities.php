@@ -57,6 +57,77 @@ function oxygen_mcp_register_admin_page() {
 		'dashicons-superhero',          // icône du menu
 		81                              // position (sous Réglages)
 	);
+
+	// Sous-page « Chat » (Mode 2b). add_submenu_page renvoie le "hook suffix"
+	// de la page : on le mémorise pour n'enfiler les assets JS/CSS QUE sur cette
+	// page (pas sur tout l'admin → bonne pratique de perf WP).
+	$GLOBALS['oxymcp_chat_hook'] = add_submenu_page(
+		'oxygen-builder-6-ai',         // slug du parent
+		'Oxygen 6 AI — Chat',          // <title>
+		'Chat',                        // libellé du sous-menu
+		'manage_options',
+		'oxygen-mcp-chat',             // slug de la sous-page
+		'oxygen_mcp_render_chat_page'  // callback de rendu
+	);
+}
+
+/**
+ * RÉGLAGES du chat (Settings API).
+ *
+ * On enregistre 4 options dans le MÊME groupe `oxygen_mcp_chat`. Le formulaire de
+ * la page chat poste vers `options.php` (cœur WP) avec `settings_fields()` → WP
+ * gère la sauvegarde, le nonce (anti-CSRF) et la notice « Réglages enregistrés ».
+ *
+ * RAPPEL SÉCU : `oxymcp_anthropic_key` est stockée en clair en DB (choix produit
+ * assumé). La page est `manage_options` (admins seulement). La clé ne sert que
+ * relayée au backend, jamais loggée côté plugin.
+ */
+add_action( 'admin_init', 'oxygen_mcp_register_chat_settings' );
+function oxygen_mcp_register_chat_settings() {
+	$group = 'oxygen_mcp_chat';
+	// esc_url_raw pour l'URL du backend ; sanitize_text_field pour les secrets
+	// (on ne veut pas réécrire la valeur, juste retirer balises/retours parasites).
+	register_setting( $group, 'oxymcp_backend_url', array( 'sanitize_callback' => 'esc_url_raw', 'default' => '' ) );
+	register_setting( $group, 'oxymcp_backend_token', array( 'sanitize_callback' => 'sanitize_text_field', 'default' => '' ) );
+	register_setting( $group, 'oxymcp_anthropic_key', array( 'sanitize_callback' => 'sanitize_text_field', 'default' => '' ) );
+	register_setting( $group, 'oxymcp_app_password', array( 'sanitize_callback' => 'sanitize_text_field', 'default' => '' ) );
+}
+
+/**
+ * Enfile les assets du chat UNIQUEMENT sur la sous-page chat.
+ *
+ * `$hook` = le hook suffix de la page courante ; on le compare à celui mémorisé.
+ * wp_localize_script injecte la config (URLs + secrets) dans une variable JS
+ * globale `OXYMCP_CHAT` → le JS vanilla la lit pour appeler le backend.
+ */
+add_action( 'admin_enqueue_scripts', 'oxygen_mcp_chat_assets' );
+function oxygen_mcp_chat_assets( $hook ) {
+	if ( $hook !== ( $GLOBALS['oxymcp_chat_hook'] ?? '' ) ) {
+		return;
+	}
+
+	$base = plugin_dir_url( __FILE__ ) . 'assets/';
+	$ver  = '0.6.0';
+	wp_enqueue_style( 'oxymcp-chat', $base . 'chat.css', array(), $ver );
+	wp_enqueue_script( 'oxymcp-chat', $base . 'chat.js', array(), $ver, true );
+
+	// mcp_auth = base64("login:app_password"). On le calcule côté PHP pour ne pas
+	// exposer la mécanique au JS ; vide si l'app password n'est pas renseigné.
+	$login   = wp_get_current_user()->user_login;
+	$app_pwd = (string) get_option( 'oxymcp_app_password', '' );
+	$mcp_auth = '' !== $app_pwd ? base64_encode( $login . ':' . $app_pwd ) : '';
+
+	wp_localize_script(
+		'oxymcp-chat',
+		'OXYMCP_CHAT',
+		array(
+			'backendUrl'   => (string) get_option( 'oxymcp_backend_url', '' ),
+			'backendToken' => (string) get_option( 'oxymcp_backend_token', '' ),
+			'mcpUrl'       => rest_url( 'oxygen-mcp/mcp' ),
+			'anthropicKey' => (string) get_option( 'oxymcp_anthropic_key', '' ),
+			'mcpAuth'      => $mcp_auth,
+		)
+	);
 }
 
 /**
@@ -118,6 +189,11 @@ function oxygen_mcp_render_admin_page() {
 					<li>this site's MCP endpoint (shown on the left);</li>
 					<li>a WordPress Application Password (see below).</li>
 				</ul>
+				<p style="margin-top:16px;">
+					<a href="<?php echo esc_url( admin_url( 'admin.php?page=oxygen-mcp-chat' ) ); ?>" class="button button-primary">
+						Open the chat &rarr;
+					</a>
+				</p>
 			</div>
 		</div>
 
@@ -132,6 +208,98 @@ function oxygen_mcp_render_admin_page() {
 			<code>BASE64(...)</code> above is the base64 encoding of
 			<code>username:app_password</code>.
 		</p>
+	</div>
+	<?php
+}
+
+/**
+ * Rendu de la PAGE CHAT (Mode 2b — chat hébergé BYOK).
+ *
+ * Deux blocs : (1) un formulaire de réglages (Settings API → options.php),
+ * (2) l'UI de chat (liste de messages + zone de saisie). Le JS (chat.js) lit la
+ * config injectée par wp_localize_script et streame la réponse du backend en SSE.
+ */
+function oxygen_mcp_render_chat_page() {
+	$mcp_endpoint = esc_url( rest_url( 'oxygen-mcp/mcp' ) );
+	$has_backend  = '' !== (string) get_option( 'oxymcp_backend_url', '' );
+	$has_key      = '' !== (string) get_option( 'oxymcp_anthropic_key', '' );
+	$has_app_pwd  = '' !== (string) get_option( 'oxymcp_app_password', '' );
+	$ready        = $has_backend && $has_key && $has_app_pwd;
+	?>
+	<div class="wrap">
+		<h1>Oxygen 6 AI — Chat</h1>
+		<p style="max-width:820px;">
+			Talk to your Oxygen site in plain language. Your Anthropic API key is
+			sent per request to the hosted backend and used only for that request.
+		</p>
+
+		<h2>Settings</h2>
+		<form method="post" action="options.php" style="max-width:680px;">
+			<?php settings_fields( 'oxygen_mcp_chat' ); // nonce + champs cachés WP ?>
+			<table class="form-table" role="presentation">
+				<tr>
+					<th scope="row"><label for="oxymcp_backend_url">Backend URL</label></th>
+					<td>
+						<input name="oxymcp_backend_url" id="oxymcp_backend_url" type="url"
+							class="regular-text" placeholder="https://your-backend.onrender.com"
+							value="<?php echo esc_attr( get_option( 'oxymcp_backend_url', '' ) ); ?>" />
+						<p class="description">The hosted agent backend (e.g. your Render URL).</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="oxymcp_backend_token">Backend access token</label></th>
+					<td>
+						<input name="oxymcp_backend_token" id="oxymcp_backend_token" type="text"
+							class="regular-text" autocomplete="off"
+							value="<?php echo esc_attr( get_option( 'oxymcp_backend_token', '' ) ); ?>" />
+						<p class="description">Optional in dev (open backend). Required once the backend enforces tokens.</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="oxymcp_anthropic_key">Anthropic API key</label></th>
+					<td>
+						<input name="oxymcp_anthropic_key" id="oxymcp_anthropic_key" type="password"
+							class="regular-text" autocomplete="off" placeholder="sk-ant-..."
+							value="<?php echo esc_attr( get_option( 'oxymcp_anthropic_key', '' ) ); ?>" />
+						<p class="description">Stored in this site's database. Used only to call Anthropic on your behalf.</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row"><label for="oxymcp_app_password">Application Password</label></th>
+					<td>
+						<input name="oxymcp_app_password" id="oxymcp_app_password" type="password"
+							class="regular-text" autocomplete="off" placeholder="xxxx xxxx xxxx xxxx" />
+						<p class="description">
+							A WordPress Application Password for <code><?php echo esc_html( wp_get_current_user()->user_login ); ?></code>
+							(used to authenticate the agent back to this site<?php echo $has_app_pwd ? ' — already saved, leave blank to keep' : ''; ?>).
+						</p>
+					</td>
+				</tr>
+				<tr>
+					<th scope="row">MCP endpoint</th>
+					<td><code><?php echo $mcp_endpoint; ?></code> <span class="description">(auto)</span></td>
+				</tr>
+			</table>
+			<?php submit_button( 'Save settings' ); ?>
+		</form>
+
+		<h2>Chat</h2>
+		<?php if ( ! $ready ) : ?>
+			<div class="notice notice-warning inline"><p>
+				Fill in the Backend URL, Anthropic API key and an Application Password above, then save, to enable the chat.
+			</p></div>
+		<?php endif; ?>
+
+		<div id="oxymcp-chat-app" class="oxymcp-chat<?php echo $ready ? '' : ' is-disabled'; ?>">
+			<div id="oxymcp-chat-log" class="oxymcp-chat__log" aria-live="polite"></div>
+			<form id="oxymcp-chat-form" class="oxymcp-chat__form">
+				<textarea id="oxymcp-chat-input" class="oxymcp-chat__input" rows="2"
+					placeholder="e.g. Lint page 33 of the CastelBox collection and summarize the result"
+					<?php echo $ready ? '' : 'disabled'; ?>></textarea>
+				<button type="submit" class="button button-primary" id="oxymcp-chat-send"
+					<?php echo $ready ? '' : 'disabled'; ?>>Send</button>
+			</form>
+		</div>
 	</div>
 	<?php
 }
