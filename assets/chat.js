@@ -136,6 +136,32 @@
 		return /credit balance is too low/i.test( text || '' ) ? text : null;
 	}
 
+	// Cas spécifique : le backend a démarré mais n'a PAS pu joindre l'endpoint MCP
+	// du site (event warning/mcp_not_connected). Quasi toujours : l'hébergeur du
+	// site (antibot / pare-feu / WAF) bloque l'IP du service hébergé. On affiche
+	// un message ACTIONNABLE plutôt que le vague « je ne vois pas les outils ».
+	function addHostBlockedError() {
+		var el = document.createElement( 'div' );
+		el.className = 'oxymcp-chat__msg oxymcp-chat__msg--error';
+		var span = document.createElement( 'span' );
+		span.textContent =
+			'Le chat n’a pas pu atteindre ton site : ton hébergeur (antibot / pare-feu) ' +
+			'bloque probablement notre agent hébergé. Deux solutions : (1) demande à ton ' +
+			'hébergeur d’autoriser l’IP de l’agent, ou (2) branche un client MCP local ' +
+			'(Claude Desktop / Claude Code), qui se connecte depuis ta propre machine.';
+		el.appendChild( span );
+		el.appendChild( document.createTextNode( ' ' ) );
+		var a = document.createElement( 'a' );
+		a.href = 'https://github.com/Dupflo/oxygen-builder-6-ai#troubleshooting';
+		a.target = '_blank';
+		a.rel = 'noopener noreferrer';
+		a.textContent = 'Guide de dépannage →';
+		el.appendChild( a );
+		log.appendChild( el );
+		log.scrollTop = log.scrollHeight;
+		return el;
+	}
+
 	// --- Parsing SSE ------------------------------------------------------
 	// Le serveur envoie des blocs séparés par une ligne vide ; chaque bloc a une
 	// ou plusieurs lignes `data: <json>`. On accumule dans un buffer et on
@@ -164,7 +190,18 @@
 			return; // bloc incomplet/non-JSON : on ignore
 		}
 
-		if ( payload.type === 'text' && payload.text ) {
+		if ( payload.type === 'warning' && payload.code === 'mcp_not_connected' ) {
+			// Les "mains" Oxygen ne sont pas connectées (hébergeur qui bloque).
+			// On note l'état ; le texte qui suivra (« je ne vois pas les outils »)
+			// sera supprimé et remplacé par un message actionnable en fin de flux.
+			removeThinking( ctx );
+			ctx.mcpBlocked = true;
+		} else if ( payload.type === 'text' && payload.text ) {
+			// Si les outils sont bloqués, on n'affiche PAS la réponse trompeuse de
+			// l'agent (on accumule quand même rien : pas de mémoire pour ce tour).
+			if ( ctx.mcpBlocked ) {
+				return;
+			}
 			if ( ! ctx.assistant ) {
 				removeThinking( ctx ); // 1er token : on enlève les points animés
 				ctx.assistant = addBubble( 'assistant', '' );
@@ -192,7 +229,7 @@
 		addBubble( 'user', prompt );
 		setBusy( true );
 
-		var ctx = { assistant: null, text: '', errored: false, errorMsg: '', thinking: null, coldTimer: null };
+		var ctx = { assistant: null, text: '', errored: false, errorMsg: '', thinking: null, coldTimer: null, mcpBlocked: false };
 		// Feedback immédiat : points animés. Indispensable pendant le cold start.
 		ctx.thinking = addThinking();
 		// Si ça traîne (> 5 s), on explique que c'est sûrement le réveil du service.
@@ -270,6 +307,17 @@
 
 			// --- Réconciliation de fin de flux ---
 			removeThinking( ctx ); // si le flux finit sans texte ni erreur (done seul)
+
+			// Cas hébergeur qui bloque : on retire toute bulle assistant (réponse
+			// trompeuse) et on affiche le message actionnable. Pas de mémoire.
+			if ( ctx.mcpBlocked ) {
+				if ( ctx.assistant ) {
+					ctx.assistant.remove();
+					ctx.assistant = null;
+				}
+				addHostBlockedError();
+				return;
+			}
 
 			var fatal = fatalInText( ctx.text );
 			if ( ctx.errored || fatal ) {

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Oxygen Builder 6 AI
  * Description: Expose des "abilities" Oxygen via l'Abilities API + MCP Adapter (WordPress 7.0). Lecture/écriture de l'arbre de page Oxygen 6. Inclut une page d'accueil de configuration (admin).
- * Version: 0.6.3
+ * Version: 0.6.4
  * Requires at least: 7.0
  * Requires PHP: 8.1
  * Author: Florian Dupuis
@@ -117,7 +117,7 @@ function oxygen_mcp_chat_assets( $hook ) {
 	}
 
 	$base = plugin_dir_url( __FILE__ ) . 'assets/';
-	$ver  = '0.6.3';
+	$ver  = '0.6.4';
 	wp_enqueue_style( 'oxymcp-chat', $base . 'chat.css', array(), $ver );
 	wp_enqueue_script( 'oxymcp-chat', $base . 'chat.js', array(), $ver, true );
 
@@ -286,6 +286,19 @@ function oxygen_mcp_render_chat_page() {
 				Fill in your Anthropic API key and an Application Password above, then save, to enable the chat.
 			</p></div>
 		<?php endif; ?>
+
+		<details style="margin:8px 0 14px;max-width:820px;">
+			<summary style="cursor:pointer;color:#646970;">Chat can’t see your site? (host blocking the hosted agent)</summary>
+			<div class="notice notice-info inline" style="margin:8px 0;"><p>
+				The hosted chat reaches your site from a cloud server. Some hosts and
+				security layers (Imunify360, BitNinja, Sucuri, Cloudflare “Bot Fight Mode”,
+				Wordfence) block datacenter IPs, so the agent can’t load the Oxygen tools.
+				Fix it by asking your host to allow the agent’s IP for <code>/wp-json/</code>,
+				or use a local MCP client (Claude Desktop / Claude Code), which connects from
+				your own machine.
+				<a href="https://github.com/Dupflo/oxygen-builder-6-ai#troubleshooting" target="_blank" rel="noopener noreferrer">Troubleshooting&nbsp;&rarr;</a>
+			</p></div>
+		</details>
 
 		<div id="oxymcp-chat-app" class="oxymcp-chat<?php echo $ready ? '' : ' is-disabled'; ?>">
 			<div id="oxymcp-chat-log" class="oxymcp-chat__log" aria-live="polite"></div>
@@ -1962,7 +1975,7 @@ function oxygen_mcp_create_server( $adapter ) {
 		'mcp',                            // route REST → /wp-json/oxygen-mcp/mcp
 		'Oxygen MCP',                     // nom lisible
 		'Pilotage Oxygen 6 via abilities', // description
-		'v0.6.3',                         // version
+		'v0.6.4',                         // version
 		array(                            // transports
 			\WP\MCP\Transport\HttpTransport::class,
 		),
