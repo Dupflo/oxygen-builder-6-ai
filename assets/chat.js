@@ -98,10 +98,10 @@
 		setBusy( true );
 
 		var ctx = { assistant: null, text: '' };
+		// Mode ouvert BYOK : pas de jeton d'accès. Le backend borne l'abus par
+		// rate-limit (par IP) et l'utilisateur paie sa propre inférence. Aucun
+		// header Authorization à envoyer.
 		var headers = { 'Content-Type': 'application/json' };
-		if ( cfg.backendToken ) {
-			headers.Authorization = 'Bearer ' + cfg.backendToken;
-		}
 
 		// Historique = les tours PRÉCÉDENTS (le message courant part dans `prompt`).
 		// On envoie au plus MAX_HISTORY derniers messages pour borner le payload.

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Oxygen Builder 6 AI
  * Description: Expose des "abilities" Oxygen via l'Abilities API + MCP Adapter (WordPress 7.0). Lecture/écriture de l'arbre de page Oxygen 6. Inclut une page d'accueil de configuration (admin).
- * Version: 0.6.0
+ * Version: 0.6.1
  * Requires at least: 7.0
  * Requires PHP: 8.1
  * Author: Florian Dupuis
@@ -82,13 +82,23 @@ function oxygen_mcp_register_admin_page() {
  * assumé). La page est `manage_options` (admins seulement). La clé ne sert que
  * relayée au backend, jamais loggée côté plugin.
  */
+// URL du backend agent hébergé. CONSTANTE (pas un réglage) : c'est toujours le
+// même service pour tous les sites, et ce N'EST PAS un secret. On ne l'expose
+// donc pas à l'utilisateur. Surchargeable en dev via wp-config.php
+// (define('OXYMCP_BACKEND_URL', 'http://127.0.0.1:8000');) — le guard ci-dessous
+// respecte une définition antérieure.
+if ( ! defined( 'OXYMCP_BACKEND_URL' ) ) {
+	define( 'OXYMCP_BACKEND_URL', 'https://oxygen-agent.onrender.com' );
+}
+
 add_action( 'admin_init', 'oxygen_mcp_register_chat_settings' );
 function oxygen_mcp_register_chat_settings() {
 	$group = 'oxygen_mcp_chat';
-	// esc_url_raw pour l'URL du backend ; sanitize_text_field pour les secrets
-	// (on ne veut pas réécrire la valeur, juste retirer balises/retours parasites).
-	register_setting( $group, 'oxymcp_backend_url', array( 'sanitize_callback' => 'esc_url_raw', 'default' => '' ) );
-	register_setting( $group, 'oxymcp_backend_token', array( 'sanitize_callback' => 'sanitize_text_field', 'default' => '' ) );
+	// Seuls deux secrets appartiennent à l'utilisateur : SA clé Anthropic (BYOK)
+	// et un Application Password de SON WordPress. Le backend (mode ouvert BYOK)
+	// n'exige aucun jeton — un secret partagé dans un plugin PUBLIC ne protège
+	// rien — donc plus de champ "Backend token". L'URL est une constante.
+	// sanitize_text_field : on retire balises/retours parasites sans réécrire la valeur.
 	register_setting( $group, 'oxymcp_anthropic_key', array( 'sanitize_callback' => 'sanitize_text_field', 'default' => '' ) );
 	register_setting( $group, 'oxymcp_app_password', array( 'sanitize_callback' => 'sanitize_text_field', 'default' => '' ) );
 }
@@ -107,7 +117,7 @@ function oxygen_mcp_chat_assets( $hook ) {
 	}
 
 	$base = plugin_dir_url( __FILE__ ) . 'assets/';
-	$ver  = '0.6.0';
+	$ver  = '0.6.1';
 	wp_enqueue_style( 'oxymcp-chat', $base . 'chat.css', array(), $ver );
 	wp_enqueue_script( 'oxymcp-chat', $base . 'chat.js', array(), $ver, true );
 
@@ -121,8 +131,7 @@ function oxygen_mcp_chat_assets( $hook ) {
 		'oxymcp-chat',
 		'OXYMCP_CHAT',
 		array(
-			'backendUrl'   => (string) get_option( 'oxymcp_backend_url', '' ),
-			'backendToken' => (string) get_option( 'oxymcp_backend_token', '' ),
+			'backendUrl'   => OXYMCP_BACKEND_URL,
 			'mcpUrl'       => rest_url( 'oxygen-mcp/mcp' ),
 			'anthropicKey' => (string) get_option( 'oxymcp_anthropic_key', '' ),
 			'mcpAuth'      => $mcp_auth,
@@ -221,10 +230,11 @@ function oxygen_mcp_render_admin_page() {
  */
 function oxygen_mcp_render_chat_page() {
 	$mcp_endpoint = esc_url( rest_url( 'oxygen-mcp/mcp' ) );
-	$has_backend  = '' !== (string) get_option( 'oxymcp_backend_url', '' );
+	// L'URL backend est une constante (toujours présente) -> "ready" ne dépend que
+	// des deux secrets de l'utilisateur : sa clé Anthropic + un Application Password.
 	$has_key      = '' !== (string) get_option( 'oxymcp_anthropic_key', '' );
 	$has_app_pwd  = '' !== (string) get_option( 'oxymcp_app_password', '' );
-	$ready        = $has_backend && $has_key && $has_app_pwd;
+	$ready        = $has_key && $has_app_pwd;
 	?>
 	<div class="wrap">
 		<h1>Oxygen 6 AI — Chat</h1>
@@ -238,30 +248,16 @@ function oxygen_mcp_render_chat_page() {
 			<?php settings_fields( 'oxygen_mcp_chat' ); // nonce + champs cachés WP ?>
 			<table class="form-table" role="presentation">
 				<tr>
-					<th scope="row"><label for="oxymcp_backend_url">Backend URL</label></th>
-					<td>
-						<input name="oxymcp_backend_url" id="oxymcp_backend_url" type="url"
-							class="regular-text" placeholder="https://your-backend.onrender.com"
-							value="<?php echo esc_attr( get_option( 'oxymcp_backend_url', '' ) ); ?>" />
-						<p class="description">The hosted agent backend (e.g. your Render URL).</p>
-					</td>
-				</tr>
-				<tr>
-					<th scope="row"><label for="oxymcp_backend_token">Backend access token</label></th>
-					<td>
-						<input name="oxymcp_backend_token" id="oxymcp_backend_token" type="text"
-							class="regular-text" autocomplete="off"
-							value="<?php echo esc_attr( get_option( 'oxymcp_backend_token', '' ) ); ?>" />
-						<p class="description">Optional in dev (open backend). Required once the backend enforces tokens.</p>
-					</td>
-				</tr>
-				<tr>
 					<th scope="row"><label for="oxymcp_anthropic_key">Anthropic API key</label></th>
 					<td>
 						<input name="oxymcp_anthropic_key" id="oxymcp_anthropic_key" type="password"
 							class="regular-text" autocomplete="off" placeholder="sk-ant-..."
 							value="<?php echo esc_attr( get_option( 'oxymcp_anthropic_key', '' ) ); ?>" />
-						<p class="description">Stored in this site's database. Used only to call Anthropic on your behalf.</p>
+						<p class="description">
+							Bring your own key (you pay Anthropic directly for usage).
+							<a href="https://console.anthropic.com/settings/keys" target="_blank" rel="noopener noreferrer">Get a key &rarr;</a><br />
+							Stored in this site's database. Used only to call Anthropic on your behalf.
+						</p>
 					</td>
 				</tr>
 				<tr>
@@ -286,7 +282,7 @@ function oxygen_mcp_render_chat_page() {
 		<h2>Chat</h2>
 		<?php if ( ! $ready ) : ?>
 			<div class="notice notice-warning inline"><p>
-				Fill in the Backend URL, Anthropic API key and an Application Password above, then save, to enable the chat.
+				Fill in your Anthropic API key and an Application Password above, then save, to enable the chat.
 			</p></div>
 		<?php endif; ?>
 
@@ -1965,7 +1961,7 @@ function oxygen_mcp_create_server( $adapter ) {
 		'mcp',                            // route REST → /wp-json/oxygen-mcp/mcp
 		'Oxygen MCP',                     // nom lisible
 		'Pilotage Oxygen 6 via abilities', // description
-		'v0.6.0',                         // version
+		'v0.6.1',                         // version
 		array(                            // transports
 			\WP\MCP\Transport\HttpTransport::class,
 		),
