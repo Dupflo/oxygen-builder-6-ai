@@ -1,8 +1,8 @@
 <?php
 /**
- * Plugin Name: Oxygen MCP Abilities
- * Description: Expose des "abilities" Oxygen via l'Abilities API + MCP Adapter (WordPress 7.0). Lecture/écriture de l'arbre de page Oxygen 6.
- * Version: 0.5.0
+ * Plugin Name: Oxygen Builder 6 AI
+ * Description: Expose des "abilities" Oxygen via l'Abilities API + MCP Adapter (WordPress 7.0). Lecture/écriture de l'arbre de page Oxygen 6. Inclut une page d'accueil de configuration (admin).
+ * Version: 0.6.0
  * Requires at least: 7.0
  * Requires PHP: 8.1
  * Author: Florian Dupuis
@@ -30,6 +30,110 @@ if ( file_exists( __DIR__ . '/vendor/autoload.php' ) ) {
 	if ( class_exists( '\WP\MCP\Core\McpAdapter' ) ) {
 		\WP\MCP\Core\McpAdapter::instance();
 	}
+}
+
+/**
+ * PAGE D'ACCUEIL (admin).
+ *
+ * Après l'activation du plugin, l'utilisateur a besoin de savoir QUOI brancher.
+ * On enregistre une page de menu d'admin (hook `admin_menu` ≈ on "monte une
+ * route" dans le back-office) qui explique les 2 façons d'utiliser le plugin :
+ *   - Mode 1 : connecter SON client MCP (Claude Desktop / Claude Code) à
+ *     l'endpoint exposé ici → gratuit, son propre runtime.
+ *   - Mode 2b : le chat hébergé (BYOK) → l'utilisateur fournit sa clé Anthropic.
+ *
+ * Tout le texte affiché est en ANGLAIS (convention repo public). Les commentaires
+ * restent pédagogiques en FR (profil dev). PIÈGE WP : toujours échapper les
+ * sorties (esc_html / esc_url / esc_attr) — pas de chaîne brute dans le HTML.
+ */
+add_action( 'admin_menu', 'oxygen_mcp_register_admin_page' );
+function oxygen_mcp_register_admin_page() {
+	add_menu_page(
+		'Oxygen Builder 6 AI',          // <title> de la page
+		'Oxygen 6 AI',                  // libellé du menu
+		'manage_options',               // capability : admins seulement
+		'oxygen-builder-6-ai',          // slug de la page (?page=...)
+		'oxygen_mcp_render_admin_page', // callback de rendu
+		'dashicons-superhero',          // icône du menu
+		81                              // position (sous Réglages)
+	);
+}
+
+/**
+ * Rendu HTML de la page d'accueil. `home_url()`/`rest_url()` donnent l'endpoint
+ * réel du site courant (donc l'utilisateur copie SA propre URL, pas un exemple).
+ */
+function oxygen_mcp_render_admin_page() {
+	// L'endpoint MCP réel de CE site (namespace inchangé : oxygen-mcp/mcp).
+	$mcp_endpoint   = esc_url( rest_url( 'oxygen-mcp/mcp' ) );
+	$app_pwd_url    = esc_url( admin_url( 'profile.php#application-passwords-section' ) );
+	$current_user   = wp_get_current_user();
+	$login          = esc_html( $current_user->user_login );
+	?>
+	<div class="wrap">
+		<h1>Oxygen Builder 6 AI</h1>
+		<p style="font-size:14px;max-width:820px;">
+			This plugin turns your WordPress + Oxygen 6 install into an
+			<strong>MCP server</strong>: an AI agent can read and write your page
+			tree, selectors (classes), variables, and lint a page.
+		</p>
+
+		<h2 style="margin-top:24px;">How do you want to use Oxygen AI?</h2>
+
+		<?php // Deux cartes côte à côte (flex). Le choix est binaire et explicite. ?>
+		<div style="display:flex;gap:20px;flex-wrap:wrap;margin-top:12px;max-width:980px;">
+
+			<?php // CARTE 1 — MCP, 100% gratuit (le runtime IA est celui du user). ?>
+			<div style="flex:1 1 380px;border:1px solid #c3c4c7;border-radius:8px;background:#fff;padding:20px;">
+				<h3 style="margin-top:0;font-size:18px;">1 — Via MCP <span style="color:#00a32a;">(100% free)</span></h3>
+				<p>
+					Connect your own MCP client — <strong>Claude Desktop</strong>,
+					<strong>Claude Code</strong>, or any MCP client — straight to this
+					site. The AI runtime is yours, so it costs nothing extra.
+				</p>
+				<p style="margin-bottom:4px;"><strong>Your MCP endpoint:</strong></p>
+				<p>
+					<code style="display:inline-block;padding:8px 12px;background:#f0f0f1;border-radius:4px;font-size:13px;word-break:break-all;">
+						<?php echo $mcp_endpoint; ?>
+					</code>
+				</p>
+				<p>Example with the <code>mcp-remote</code> bridge:</p>
+				<pre style="padding:12px;background:#1d2327;color:#f0f0f1;border-radius:4px;overflow:auto;font-size:12px;line-height:1.5;">npx -y mcp-remote <?php echo $mcp_endpoint; ?> \
+  --header "Authorization: Basic BASE64(<?php echo $login; ?>:app_password)"</pre>
+			</div>
+
+			<?php // CARTE 2 — Chat conversationnel (BYOK aujourd'hui ; abonnement plus tard). ?>
+			<div style="flex:1 1 380px;border:1px solid #c3c4c7;border-radius:8px;background:#fff;padding:20px;">
+				<h3 style="margin-top:0;font-size:18px;">2 — Via the conversational chat</h3>
+				<p style="color:#646970;margin-top:-6px;">API key or subscription</p>
+				<p>
+					Prefer not to set up a desktop client? Use the hosted chat and
+					bring <strong>your own Anthropic API key</strong> (a managed
+					subscription is planned). Your key is used only for the duration
+					of the request — never stored, never logged.
+				</p>
+				<p style="margin-bottom:4px;"><strong>You will need:</strong></p>
+				<ul style="list-style:disc;margin-left:20px;">
+					<li>your Anthropic API key (<code>sk-ant-...</code>);</li>
+					<li>this site's MCP endpoint (shown on the left);</li>
+					<li>a WordPress Application Password (see below).</li>
+				</ul>
+			</div>
+		</div>
+
+		<h2 style="margin-top:28px;">Authentication — create an Application Password</h2>
+		<p style="max-width:820px;">
+			Both options authenticate with a WordPress
+			<strong>Application Password</strong> (not your login password).
+			Go to <a href="<?php echo $app_pwd_url; ?>">your profile &rarr;
+			Application Passwords</a>, create one named e.g. <code>oxygen-mcp</code>,
+			and copy the generated value (shown only once).
+			Your username is <code><?php echo $login; ?></code>.
+			<code>BASE64(...)</code> above is the base64 encoding of
+			<code>username:app_password</code>.
+		</p>
+	</div>
+	<?php
 }
 
 /**
@@ -1693,7 +1797,7 @@ function oxygen_mcp_create_server( $adapter ) {
 		'mcp',                            // route REST → /wp-json/oxygen-mcp/mcp
 		'Oxygen MCP',                     // nom lisible
 		'Pilotage Oxygen 6 via abilities', // description
-		'v0.5.0',                         // version
+		'v0.6.0',                         // version
 		array(                            // transports
 			\WP\MCP\Transport\HttpTransport::class,
 		),
