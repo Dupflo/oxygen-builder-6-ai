@@ -18,6 +18,12 @@
 	var sendBtn = document.getElementById( 'oxymcp-chat-send' );
 	var log = document.getElementById( 'oxymcp-chat-log' );
 
+	// Mémoire de conversation : on garde le fil côté CLIENT et on le renvoie à
+	// chaque tour. Le backend est SANS état (robuste aux redémarrages Render).
+	// [{ role: 'user' | 'assistant', content: '...' }, ...]
+	var history = [];
+	var MAX_HISTORY = 20; // on borne le payload (cf. backend _MAX_HISTORY_MESSAGES)
+
 	// Garde-fou : si le markup n'est pas là (autre page), on ne fait rien.
 	if ( ! form || ! input || ! log ) {
 		return;
@@ -73,6 +79,7 @@
 				ctx.assistant = addBubble( 'assistant', '' );
 			}
 			ctx.assistant.textContent += payload.text;
+			ctx.text += payload.text; // accumulé pour l'historique (mémoire)
 			log.scrollTop = log.scrollHeight;
 		} else if ( payload.type === 'error' ) {
 			addBubble( 'error', 'Error: ' + ( payload.message || 'unknown error' ) );
@@ -90,11 +97,15 @@
 		addBubble( 'user', prompt );
 		setBusy( true );
 
-		var ctx = { assistant: null };
+		var ctx = { assistant: null, text: '' };
 		var headers = { 'Content-Type': 'application/json' };
 		if ( cfg.backendToken ) {
 			headers.Authorization = 'Bearer ' + cfg.backendToken;
 		}
+
+		// Historique = les tours PRÉCÉDENTS (le message courant part dans `prompt`).
+		// On envoie au plus MAX_HISTORY derniers messages pour borner le payload.
+		var priorHistory = history.slice( -MAX_HISTORY );
 
 		try {
 			var resp = await fetch( cfg.backendUrl.replace( /\/$/, '' ) + '/chat', {
@@ -105,6 +116,7 @@
 					anthropic_api_key: cfg.anthropicKey,
 					mcp_url: cfg.mcpUrl,
 					mcp_auth: cfg.mcpAuth,
+					history: priorHistory,
 				} ),
 			} );
 
@@ -144,6 +156,14 @@
 			// Flush d'un éventuel dernier event sans double saut de ligne final.
 			if ( buffer.trim() ) {
 				handleEvent( buffer, ctx );
+			}
+
+			// Tour complet réussi -> on l'ajoute à la mémoire pour les prochains
+			// messages. On stocke APRÈS le stream (et seulement si l'agent a
+			// répondu) pour ne jamais mémoriser un tour vide/échoué.
+			if ( ctx.text ) {
+				history.push( { role: 'user', content: prompt } );
+				history.push( { role: 'assistant', content: ctx.text } );
 			}
 		} catch ( err ) {
 			addBubble( 'error', 'Network error: ' + ( err && err.message ? err.message : err ) );
