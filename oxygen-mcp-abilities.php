@@ -268,6 +268,7 @@ function oxygen_mcp_render_chat_page() {
 						<p class="description">
 							A WordPress Application Password for <code><?php echo esc_html( wp_get_current_user()->user_login ); ?></code>
 							(used to authenticate the agent back to this site<?php echo $has_app_pwd ? ' — already saved, leave blank to keep' : ''; ?>).
+							<a href="<?php echo esc_url( admin_url( 'profile.php#application-passwords-section' ) ); ?>" target="_blank" rel="noopener noreferrer">Create one &rarr;</a>
 						</p>
 					</td>
 				</tr>
