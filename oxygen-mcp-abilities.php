@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Oxygen Builder 6 AI
  * Description: Expose des "abilities" Oxygen via l'Abilities API + MCP Adapter (WordPress 7.0). Lecture/écriture de l'arbre de page Oxygen 6. Inclut une page d'accueil de configuration (admin).
- * Version: 0.6.4
+ * Version: 0.7.0
  * Requires at least: 7.0
  * Requires PHP: 8.1
  * Author: Florian Dupuis
@@ -117,7 +117,7 @@ function oxygen_mcp_chat_assets( $hook ) {
 	}
 
 	$base = plugin_dir_url( __FILE__ ) . 'assets/';
-	$ver  = '0.6.4';
+	$ver  = '0.7.0';
 	wp_enqueue_style( 'oxymcp-chat', $base . 'chat.css', array(), $ver );
 	wp_enqueue_script( 'oxymcp-chat', $base . 'chat.js', array(), $ver, true );
 
@@ -135,6 +135,15 @@ function oxygen_mcp_chat_assets( $hook ) {
 			'mcpUrl'       => rest_url( 'oxygen-mcp/mcp' ),
 			'anthropicKey' => (string) get_option( 'oxymcp_anthropic_key', '' ),
 			'mcpAuth'      => $mcp_auth,
+			// --- Mode RELAIS navigateur ---
+			// Le JS parle au MCP du site DEPUIS le navigateur de l'admin (IP
+			// résidentielle + session WP) -> contourne l'antibot de l'hébergeur
+			// qui bloque l'IP datacenter du backend. Auth = cookie WP + ce nonce
+			// REST (`wp_rest`, attendu par WP core sur les routes REST/MCP via le
+			// header X-WP-Nonce). `ajaxUrl` sert à rafraîchir le nonce s'il périme
+			// (action cœur `rest-nonce`).
+			'restNonce'    => wp_create_nonce( 'wp_rest' ),
+			'ajaxUrl'      => admin_url( 'admin-ajax.php' ),
 		)
 	);
 }
@@ -1975,7 +1984,7 @@ function oxygen_mcp_create_server( $adapter ) {
 		'mcp',                            // route REST → /wp-json/oxygen-mcp/mcp
 		'Oxygen MCP',                     // nom lisible
 		'Pilotage Oxygen 6 via abilities', // description
-		'v0.6.4',                         // version
+		'v0.7.0',                         // version
 		array(                            // transports
 			\WP\MCP\Transport\HttpTransport::class,
 		),

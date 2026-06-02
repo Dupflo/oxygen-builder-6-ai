@@ -162,6 +162,222 @@
 		return el;
 	}
 
+	// --- Client MCP same-origin (mode relais navigateur) ------------------
+	// Au lieu que le BACKEND (IP datacenter, bloquée par l'antibot de
+	// l'hébergeur) appelle WordPress, c'est le NAVIGATEUR de l'admin qui parle
+	// au endpoint MCP du SITE — même origine, IP résidentielle + session WP par
+	// cookie. Ça annule le mur antibot ET évite d'exposer l'Application Password.
+	//
+	// Le protocole MCP Streamable HTTP est SESSION-BASED : `initialize` crée une
+	// session et renvoie son id dans le header de réponse `Mcp-Session-Id` ; on
+	// doit le rejouer en header de requête pour `tools/list` et `tools/call`.
+	var mcp = {
+		url: ( cfg.mcpUrl || '' ),
+		sessionId: null, // capturé depuis le header de réponse d'initialize
+		nextId: 1, // compteur d'id JSON-RPC (≈ un auto-increment)
+		tools: null, // specs d'outils mises en cache après le 1er handshake
+	};
+
+	// Lit une réponse MCP : soit JSON direct, soit un flux SSE (text/event-stream
+	// — Streamable HTTP peut répondre dans les deux formats). Renvoie le message
+	// JSON-RPC parsé, ou null (réponses 202 sans corps : notifications).
+	async function mcpReadResponse( resp ) {
+		var ct = resp.headers.get( 'content-type' ) || '';
+		var body = await resp.text();
+		if ( ! body ) {
+			return null;
+		}
+		if ( ct.indexOf( 'text/event-stream' ) !== -1 ) {
+			// On recolle les lignes `data:` (le message JSON-RPC tient dans l'event).
+			var joined = body
+				.split( /\r?\n/ )
+				.filter( function ( l ) {
+					return l.indexOf( 'data:' ) === 0;
+				} )
+				.map( function ( l ) {
+					return l.slice( 5 ).replace( /^ /, '' );
+				} )
+				.join( '\n' );
+			if ( ! joined ) {
+				return null;
+			}
+			try {
+				return JSON.parse( joined );
+			} catch ( e ) {
+				return null;
+			}
+		}
+		try {
+			return JSON.parse( body );
+		} catch ( e ) {
+			return null;
+		}
+	}
+
+	// Rafraîchit le nonce REST via l'action ajax cœur `rest-nonce` (renvoie un
+	// `wp_rest` frais). Best-effort : si indisponible, on renverra null et le
+	// 403 remontera en erreur claire « recharge la page ».
+	async function refreshNonce() {
+		if ( ! cfg.ajaxUrl ) {
+			return null;
+		}
+		try {
+			var r = await fetch( cfg.ajaxUrl + '?action=rest-nonce', {
+				credentials: 'same-origin',
+			} );
+			if ( ! r.ok ) {
+				return null;
+			}
+			var t = ( await r.text() ).trim();
+			return t || null;
+		} catch ( e ) {
+			return null;
+		}
+	}
+
+	// POST JSON-RPC vers le endpoint MCP du site. Porte cookie + X-WP-Nonce
+	// (auth WP) + Accept JSON/SSE (exigé par Streamable HTTP) + Mcp-Session-Id si
+	// connu. Retry UNE fois sur 403 (nonce périmé -> on tente un refresh).
+	async function mcpPost( payload, opts ) {
+		opts = opts || {};
+		var headers = {
+			'Content-Type': 'application/json',
+			Accept: 'application/json, text/event-stream',
+		};
+		if ( cfg.restNonce ) {
+			headers[ 'X-WP-Nonce' ] = cfg.restNonce;
+		}
+		if ( mcp.sessionId ) {
+			headers[ 'Mcp-Session-Id' ] = mcp.sessionId;
+		}
+		var resp = await fetch( mcp.url, {
+			method: 'POST',
+			credentials: 'same-origin', // envoie le cookie de session WP
+			headers: headers,
+			body: JSON.stringify( payload ),
+		} );
+		// initialize renvoie l'id de session dans ce header -> on le mémorise.
+		var sid = resp.headers.get( 'Mcp-Session-Id' );
+		if ( sid ) {
+			mcp.sessionId = sid;
+		}
+		if ( resp.status === 403 && ! opts._retried ) {
+			var fresh = await refreshNonce();
+			if ( fresh ) {
+				cfg.restNonce = fresh;
+				opts._retried = true;
+				return mcpPost( payload, opts );
+			}
+		}
+		return resp;
+	}
+
+	// Handshake MCP + récupération des outils (mis en cache). Le résultat sert à
+	// déclarer le serveur MCP in-process côté backend (mode relais).
+	async function ensureMcpTools() {
+		if ( mcp.tools ) {
+			return mcp.tools;
+		}
+		// 1) initialize (pas de header session -> en crée une).
+		var initResp = await mcpPost( {
+			jsonrpc: '2.0',
+			id: mcp.nextId++,
+			method: 'initialize',
+			params: {
+				protocolVersion: '2025-11-25',
+				capabilities: {},
+				clientInfo: { name: 'oxygen-chat-browser', version: '1.0.0' },
+			},
+		} );
+		if ( ! initResp.ok ) {
+			throw new Error( 'MCP initialize HTTP ' + initResp.status );
+		}
+		await mcpReadResponse( initResp ); // header session déjà capturé dans mcpPost
+		// 2) notification initialized (notification = pas d'id -> 202 sans corps).
+		await mcpPost( {
+			jsonrpc: '2.0',
+			method: 'notifications/initialized',
+			params: {},
+		} );
+		// 3) tools/list (rejoue le header Mcp-Session-Id).
+		var listResp = await mcpPost( {
+			jsonrpc: '2.0',
+			id: mcp.nextId++,
+			method: 'tools/list',
+			params: {},
+		} );
+		if ( ! listResp.ok ) {
+			throw new Error( 'MCP tools/list HTTP ' + listResp.status );
+		}
+		var listMsg = await mcpReadResponse( listResp );
+		var tools = ( listMsg && listMsg.result && listMsg.result.tools ) || [];
+		// On normalise pour le backend (ToolSpec) : inputSchema -> input_schema.
+		mcp.tools = tools.map( function ( t ) {
+			return {
+				name: t.name,
+				description: t.description || '',
+				input_schema: t.inputSchema || {},
+			};
+		} );
+		return mcp.tools;
+	}
+
+	// Exécute UN appel d'outil dans le navigateur (tools/call same-origin) et
+	// renvoie le champ `result` de la réponse MCP ({content, isError}).
+	async function mcpToolsCall( name, args ) {
+		var resp = await mcpPost( {
+			jsonrpc: '2.0',
+			id: mcp.nextId++,
+			method: 'tools/call',
+			params: { name: name, arguments: args || {} },
+		} );
+		if ( ! resp.ok ) {
+			throw new Error( 'tools/call HTTP ' + resp.status );
+		}
+		var msg = await mcpReadResponse( resp );
+		if ( msg && msg.error ) {
+			throw new Error( ( msg.error && msg.error.message ) || 'tool error' );
+		}
+		return ( msg && msg.result ) || null;
+	}
+
+	// Renvoie le résultat d'un tool_call au backend pour débloquer l'agent
+	// (résout la Future en attente côté serveur). Corrélé par (session_id, id).
+	async function postToolResult( sessionId, id, ok, payload ) {
+		try {
+			await fetch( cfg.backendUrl.replace( /\/$/, '' ) + '/chat/tool_result', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify( {
+					session_id: sessionId,
+					id: id,
+					ok: ok,
+					payload: payload,
+				} ),
+			} );
+		} catch ( e ) {
+			// Réseau coupé : le backend finira par timeout (45 s) -> erreur propre.
+		}
+	}
+
+	// Reçu un event `tool_call` du backend : on exécute l'appel WP DANS le
+	// navigateur puis on POST le résultat. Fire-and-forget (pas d'await dans le
+	// parseur SSE) : le backend attend le résultat sur sa propre Future.
+	function handleToolCall( payload, ctx ) {
+		mcpToolsCall( payload.name, payload.args )
+			.then( function ( result ) {
+				return postToolResult( ctx.sessionId, payload.id, true, result );
+			} )
+			.catch( function ( err ) {
+				return postToolResult(
+					ctx.sessionId,
+					payload.id,
+					false,
+					( err && err.message ) || String( err )
+				);
+			} );
+	}
+
 	// --- Parsing SSE ------------------------------------------------------
 	// Le serveur envoie des blocs séparés par une ligne vide ; chaque bloc a une
 	// ou plusieurs lignes `data: <json>`. On accumule dans un buffer et on
@@ -190,7 +406,15 @@
 			return; // bloc incomplet/non-JSON : on ignore
 		}
 
-		if ( payload.type === 'warning' && payload.code === 'mcp_not_connected' ) {
+		if ( payload.type === 'ready' ) {
+			// 1er event du mode relais : le backend nous donne le session_id à
+			// renvoyer avec chaque résultat d'outil (POST /chat/tool_result).
+			ctx.sessionId = payload.session_id;
+		} else if ( payload.type === 'tool_call' ) {
+			// L'agent veut appeler un outil Oxygen : on l'exécute dans le
+			// navigateur (même origine) -> contourne l'antibot de l'hébergeur.
+			handleToolCall( payload, ctx );
+		} else if ( payload.type === 'warning' && payload.code === 'mcp_not_connected' ) {
 			// Les "mains" Oxygen ne sont pas connectées (hébergeur qui bloque).
 			// On note l'état ; le texte qui suivra (« je ne vois pas les outils »)
 			// sera supprimé et remplacé par un message actionnable en fin de flux.
@@ -229,7 +453,12 @@
 		addBubble( 'user', prompt );
 		setBusy( true );
 
-		var ctx = { assistant: null, text: '', errored: false, errorMsg: '', thinking: null, coldTimer: null, mcpBlocked: false };
+		var ctx = { assistant: null, text: '', errored: false, errorMsg: '', thinking: null, coldTimer: null, mcpBlocked: false, sessionId: null };
+
+		// Mode RELAIS si on a de quoi parler au MCP du site depuis le navigateur
+		// (nonce REST + URL MCP same-origin). Sinon repli sur le mode DIRECT
+		// (legacy : le backend appelle WP -> bloqué par l'antibot de l'hébergeur).
+		var relayMode = !! ( cfg.restNonce && cfg.mcpUrl );
 		// Feedback immédiat : points animés. Indispensable pendant le cold start.
 		ctx.thinking = addThinking();
 		// Si ça traîne (> 5 s), on explique que c'est sûrement le réveil du service.
@@ -252,16 +481,37 @@
 		var priorHistory = history.slice( -MAX_HISTORY );
 
 		try {
+			// Corps de requête commun aux deux modes.
+			var body = {
+				prompt: prompt,
+				anthropic_api_key: cfg.anthropicKey,
+				history: priorHistory,
+			};
+
+			if ( relayMode ) {
+				// On fait le handshake MCP dans le navigateur et on envoie les
+				// schémas d'outils -> le backend monte un serveur MCP in-process
+				// qui relaie chaque appel vers cet onglet. L'Application Password
+				// ne transite JAMAIS par le backend dans ce mode.
+				var tools = await ensureMcpTools();
+				if ( ! tools.length ) {
+					removeThinking( ctx );
+					addError(
+						'Aucun outil Oxygen détecté sur ton site. Vérifie que le plugin est actif puis recharge la page.'
+					);
+					return;
+				}
+				body.tools = tools;
+			} else {
+				// Mode DIRECT (legacy) : le backend appelle WP en HTTP.
+				body.mcp_url = cfg.mcpUrl;
+				body.mcp_auth = cfg.mcpAuth;
+			}
+
 			var resp = await fetch( cfg.backendUrl.replace( /\/$/, '' ) + '/chat', {
 				method: 'POST',
 				headers: headers,
-				body: JSON.stringify( {
-					prompt: prompt,
-					anthropic_api_key: cfg.anthropicKey,
-					mcp_url: cfg.mcpUrl,
-					mcp_auth: cfg.mcpAuth,
-					history: priorHistory,
-				} ),
+				body: JSON.stringify( body ),
 			} );
 
 			if ( ! resp.ok ) {
