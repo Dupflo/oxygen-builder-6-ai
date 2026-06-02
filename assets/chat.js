@@ -48,6 +48,94 @@
 		sendBtn.textContent = busy ? 'Sending…' : 'Send';
 	}
 
+	// Indicateur "réflexion en cours" : une bulle assistant avec 3 points animés.
+	// Affichée DÈS l'envoi (essentiel pendant le cold start Render ~30-60 s, sinon
+	// "rien ne se passe"), retirée au 1er token ou en cas d'erreur.
+	function addThinking() {
+		var el = document.createElement( 'div' );
+		el.className = 'oxymcp-chat__msg oxymcp-chat__msg--assistant oxymcp-chat__thinking';
+		var dots = document.createElement( 'span' );
+		dots.className = 'oxymcp-chat__dots';
+		for ( var i = 0; i < 3; i++ ) {
+			dots.appendChild( document.createElement( 'i' ) );
+		}
+		el.appendChild( dots );
+		// Libellé d'aide (vide au départ ; rempli si le cold start traîne).
+		var hint = document.createElement( 'span' );
+		hint.className = 'oxymcp-chat__hint';
+		el.appendChild( hint );
+		log.appendChild( el );
+		log.scrollTop = log.scrollHeight;
+		return el;
+	}
+
+	// Retire l'indicateur + annule le timer de cold start. Idempotent.
+	function removeThinking( ctx ) {
+		if ( ctx.thinking ) {
+			ctx.thinking.remove();
+			ctx.thinking = null;
+		}
+		if ( ctx.coldTimer ) {
+			clearTimeout( ctx.coldTimer );
+			ctx.coldTimer = null;
+		}
+	}
+
+	// Traduit une erreur technique en message clair (+ lien d'action si utile).
+	// On matche sur des bouts de message connus (insensible à la casse).
+	function friendlyError( raw ) {
+		var s = ( raw || '' ).toLowerCase();
+		if ( s.indexOf( 'credit balance is too low' ) !== -1 ) {
+			return {
+				text: 'Crédit Anthropic épuisé. Recharge ton compte pour utiliser le chat (la même clé remarchera).',
+				link: { href: 'https://console.anthropic.com/settings/billing', label: 'Plans & Billing →' },
+			};
+		}
+		if ( s.indexOf( 'invalid x-api-key' ) !== -1 || s.indexOf( 'authentication' ) !== -1 || s.indexOf( '401' ) !== -1 ) {
+			return { text: 'Clé Anthropic invalide ou manquante. Vérifie-la dans les réglages ci-dessus.' };
+		}
+		if ( s.indexOf( 'overloaded' ) !== -1 || s.indexOf( 'rate limit' ) !== -1 || s.indexOf( '429' ) !== -1 ) {
+			return { text: 'Service momentanément surchargé. Réessaie dans quelques secondes.' };
+		}
+		if ( s.indexOf( '422' ) !== -1 ) {
+			return { text: 'Réglages pas encore chargés dans cette page. Recharge-la (Ctrl/Cmd+Shift+R) puis réessaie.' };
+		}
+		if ( s.indexOf( 'returned an error result' ) !== -1 ) {
+			return { text: 'L’agent s’est interrompu. Réessaie ; si ça persiste, vérifie ta clé et ton crédit Anthropic.' };
+		}
+		return { text: raw || 'Erreur inconnue.' };
+	}
+
+	// Affiche une bulle d'erreur. DOM construit à la main (textContent + <a>
+	// éventuel) -> aucune injection HTML possible.
+	function addError( raw ) {
+		var info = friendlyError( raw );
+		var el = document.createElement( 'div' );
+		el.className = 'oxymcp-chat__msg oxymcp-chat__msg--error';
+		var span = document.createElement( 'span' );
+		span.textContent = info.text;
+		el.appendChild( span );
+		if ( info.link ) {
+			el.appendChild( document.createTextNode( ' ' ) );
+			var a = document.createElement( 'a' );
+			a.href = info.link.href;
+			a.target = '_blank';
+			a.rel = 'noopener noreferrer';
+			a.textContent = info.link.label;
+			el.appendChild( a );
+		}
+		log.appendChild( el );
+		log.scrollTop = log.scrollHeight;
+		return el;
+	}
+
+	// Certaines erreurs (ex. solde Anthropic) arrivent comme un message NORMAL de
+	// l'agent (TextBlock), pas comme un event "error". On les repère pour les
+	// afficher en rouge plutôt qu'en fausse réponse. Renvoie la chaîne ou null.
+	function fatalInText( text ) {
+		return /credit balance is too low/i.test( text || '' ) ? text : null;
+	}
+
 	// --- Parsing SSE ------------------------------------------------------
 	// Le serveur envoie des blocs séparés par une ligne vide ; chaque bloc a une
 	// ou plusieurs lignes `data: <json>`. On accumule dans un buffer et on
@@ -76,13 +164,18 @@
 
 		if ( payload.type === 'text' && payload.text ) {
 			if ( ! ctx.assistant ) {
+				removeThinking( ctx ); // 1er token : on enlève les points animés
 				ctx.assistant = addBubble( 'assistant', '' );
 			}
 			ctx.assistant.textContent += payload.text;
 			ctx.text += payload.text; // accumulé pour l'historique (mémoire)
 			log.scrollTop = log.scrollHeight;
 		} else if ( payload.type === 'error' ) {
-			addBubble( 'error', 'Error: ' + ( payload.message || 'unknown error' ) );
+			// On ne RENDS pas tout de suite : on mémorise et on tranche en fin de
+			// flux (pour fusionner avec une éventuelle erreur "fatale" en texte).
+			removeThinking( ctx );
+			ctx.errored = true;
+			ctx.errorMsg = payload.message || 'unknown error';
 		}
 		// type === 'done' : rien à afficher, la session est finie.
 	}
@@ -90,14 +183,26 @@
 	// --- Envoi + lecture du flux -----------------------------------------
 	async function send( prompt ) {
 		if ( ! cfg.backendUrl ) {
-			addBubble( 'error', 'Backend URL is not configured (see Settings above).' );
+			addError( 'Backend URL is not configured (see Settings above).' );
 			return;
 		}
 
 		addBubble( 'user', prompt );
 		setBusy( true );
 
-		var ctx = { assistant: null, text: '' };
+		var ctx = { assistant: null, text: '', errored: false, errorMsg: '', thinking: null, coldTimer: null };
+		// Feedback immédiat : points animés. Indispensable pendant le cold start.
+		ctx.thinking = addThinking();
+		// Si ça traîne (> 5 s), on explique que c'est sûrement le réveil du service.
+		ctx.coldTimer = setTimeout( function () {
+			if ( ctx.thinking ) {
+				var h = ctx.thinking.querySelector( '.oxymcp-chat__hint' );
+				if ( h ) {
+					h.textContent = 'Réveil du service (cold start, ~30 s)…';
+				}
+			}
+		}, 5000 );
+
 		// Mode ouvert BYOK : pas de jeton d'accès. Le backend borne l'abus par
 		// rate-limit (par IP) et l'utilisateur paie sa propre inférence. Aucun
 		// header Authorization à envoyer.
@@ -121,6 +226,7 @@
 			} );
 
 			if ( ! resp.ok ) {
+				removeThinking( ctx );
 				var msg = 'HTTP ' + resp.status;
 				try {
 					var j = await resp.json();
@@ -128,7 +234,7 @@
 						msg += ' — ' + ( typeof j.detail === 'string' ? j.detail : JSON.stringify( j.detail ) );
 					}
 				} catch ( e ) {}
-				addBubble( 'error', 'Request failed: ' + msg );
+				addError( msg );
 				return;
 			}
 
@@ -158,15 +264,28 @@
 				handleEvent( buffer, ctx );
 			}
 
-			// Tour complet réussi -> on l'ajoute à la mémoire pour les prochains
-			// messages. On stocke APRÈS le stream (et seulement si l'agent a
-			// répondu) pour ne jamais mémoriser un tour vide/échoué.
-			if ( ctx.text ) {
+			// --- Réconciliation de fin de flux ---
+			removeThinking( ctx ); // si le flux finit sans texte ni erreur (done seul)
+
+			var fatal = fatalInText( ctx.text );
+			if ( ctx.errored || fatal ) {
+				// Si la bulle "assistant" ne contient QUE l'erreur (ou rien), on la
+				// retire pour ne pas afficher deux fois la même chose.
+				if ( ctx.assistant && ( fatal || ! ctx.text.trim() ) ) {
+					ctx.assistant.remove();
+					ctx.assistant = null;
+				}
+				addError( fatal || ctx.errorMsg );
+				// Un tour en erreur n'entre PAS dans la mémoire (sinon on rejouerait
+				// "Crédit épuisé" comme contexte au tour suivant).
+			} else if ( ctx.text ) {
+				// Tour complet réussi -> mémoire pour les prochains messages.
 				history.push( { role: 'user', content: prompt } );
 				history.push( { role: 'assistant', content: ctx.text } );
 			}
 		} catch ( err ) {
-			addBubble( 'error', 'Network error: ' + ( err && err.message ? err.message : err ) );
+			removeThinking( ctx );
+			addError( 'Network error: ' + ( err && err.message ? err.message : err ) );
 		} finally {
 			setBusy( false );
 			input.focus();

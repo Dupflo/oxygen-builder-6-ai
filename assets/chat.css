@@ -56,6 +56,67 @@
 	color: #8a1f1f;
 }
 
+.oxymcp-chat__msg--error a {
+	color: #8a1f1f;
+	font-weight: 600;
+	white-space: nowrap;
+}
+
+/* Indicateur "réflexion en cours" : 3 points qui pulsent + libellé optionnel. */
+.oxymcp-chat__thinking {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.oxymcp-chat__dots {
+	display: inline-flex;
+	gap: 4px;
+}
+
+.oxymcp-chat__dots i {
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: #8c8f94;
+	display: inline-block;
+	animation: oxymcp-bounce 1.2s infinite ease-in-out both;
+}
+
+.oxymcp-chat__dots i:nth-child(2) {
+	animation-delay: 0.16s;
+}
+
+.oxymcp-chat__dots i:nth-child(3) {
+	animation-delay: 0.32s;
+}
+
+@keyframes oxymcp-bounce {
+	0%, 80%, 100% {
+		transform: scale(0.6);
+		opacity: 0.5;
+	}
+	40% {
+		transform: scale(1);
+		opacity: 1;
+	}
+}
+
+.oxymcp-chat__hint {
+	font-size: 12px;
+	color: #646970;
+	font-style: italic;
+}
+
+/* Respect des préférences d'accessibilité : pas d'animation si l'utilisateur
+   a demandé à réduire les mouvements. */
+@media ( prefers-reduced-motion: reduce ) {
+	.oxymcp-chat__dots i {
+		animation: none;
+		opacity: 0.7;
+	}
+}
+
 .oxymcp-chat__form {
 	display: flex;
 	gap: 8px;
